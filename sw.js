@@ -2,7 +2,7 @@
 // so it still opens in a gym basement with no signal.
 importScripts('library.js');
 
-const VERSION = 'gym-v2';
+const VERSION = 'gym-v3';
 const CORE = ['./', 'index.html', 'app.js', 'library.js', 'plan.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png'];
 const IMAGES = LIBRARY.flatMap(e => [`img/${e.id}-0.jpg`, `img/${e.id}-1.jpg`]);
 

@@ -62,11 +62,19 @@ h1,h2,h3,p{margin:0}
 .thumbs .ph{flex:1;aspect-ratio:1;border-radius:12px;background:var(--s2);display:grid;place-items:center;color:var(--mu)}
 .resume{background:linear-gradient(135deg,#26330a,#1a2208);border:1px solid #3c5210}
 .daylist{display:flex;flex-direction:column;gap:8px}
-.dayrow{display:flex;align-items:center;gap:12px;background:var(--s1);border-radius:16px;padding:14px 16px;text-align:left;width:100%}
+.dayrow{display:flex;align-items:flex-start;gap:12px;background:var(--s1);border:2px solid transparent;border-radius:16px;padding:12px 14px;text-align:left;width:100%}
 .dayrow:active{background:var(--s3)}
-.dayrow .dn{font-weight:650}
-.dayrow .dd{font-size:13px;color:var(--mu)}
-.dayrow .go{margin-left:auto;color:var(--mu)}
+.dayrow.on{border-color:var(--ac);background:#1b2111}
+.dnum{width:30px;height:30px;border-radius:50%;background:var(--s3);display:grid;place-items:center;font-weight:700;font-size:15px;flex:none}
+.dnum.ok{background:var(--ac);color:var(--on-ac)}
+.dnum .ic{width:16px;height:16px;stroke-width:3.2}
+.dtx{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.dn{display:block;font-weight:650;line-height:1.25}
+.dd{display:block;font-size:13px;color:var(--mu)}
+.badge.up{background:var(--ac);color:var(--on-ac);margin:0 0 0 8px;vertical-align:1px}
+.dayrow .thumbs{margin:8px 0 0}
+.dayrow .thumbs img,.dayrow .thumbs .ph{max-width:54px}
+.startbar{margin-top:auto;padding-top:6px}
 .sect{font-size:13px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;font-weight:600;margin-top:6px}
 
 /* ---------- workout ---------- */
@@ -91,15 +99,40 @@ h1,h2,h3,p{margin:0}
 .chip.ac{background:var(--ac);color:var(--on-ac)}
 .chip.rest{background:rgba(76,201,240,.16);color:var(--rest)}
 .note{color:var(--mu);font-size:14px;line-height:1.3;min-height:0}
-.weight{display:flex;align-items:center;gap:12px}
-.wbtn{width:72px;height:72px;border-radius:22px;background:var(--s2);display:grid;place-items:center;flex:none}
+.weight{display:flex;align-items:center;gap:8px}
+.wbtn{width:56px;height:66px;border-radius:18px;background:var(--s2);display:grid;place-items:center;flex:none}
 .wbtn:active{background:var(--s3)}
-.wbtn .ic{width:30px;height:30px}
-.wbox{flex:1;min-width:0;text-align:center}
-.wbox input{background:transparent;border:0;border-bottom:2px solid var(--line);border-radius:0;text-align:center;font-size:46px;font-weight:800;letter-spacing:-.03em;padding:0 0 2px;-moz-appearance:textfield}
-.wbox input::-webkit-outer-spin-button,.wbox input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-.wbox input:focus{border-bottom-color:var(--ac)}
-.wbox .u{font-size:13px;color:var(--mu);margin-top:2px}
+.wbtn .ic{width:28px;height:28px}
+.wpair{flex:1;min-width:0;display:flex;gap:8px}
+.wu{flex:1;min-width:0;display:block;background:var(--s1);border:2px solid transparent;border-radius:16px;padding:7px 4px 6px;text-align:center}
+.wu.act{border-color:var(--ac)}
+.wu input{display:block;background:transparent;border:0;border-radius:0;padding:0;width:100%;text-align:center;font-size:28px;font-weight:800;letter-spacing:-.03em;-moz-appearance:textfield}
+.wu input:focus{border:0}
+.wu input::-webkit-outer-spin-button,.wu input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.wu span{display:block;font-size:11px;color:var(--mu);font-weight:700;text-transform:uppercase;letter-spacing:.1em}
+.wu.act span{color:var(--ac)}
+.wtools{display:flex;gap:5px;align-items:center;overflow-x:auto;scrollbar-width:none}
+.wtools::-webkit-scrollbar{display:none}
+.wlab{width:48px;flex:none;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--mu);line-height:1.1}
+.wlab.neg{color:var(--rest)}
+.stp{flex:1 0 auto;min-width:42px;height:34px;border-radius:10px;background:var(--s2);font-weight:650;font-size:14px;padding:0 6px}
+.stp.on{background:var(--ac);color:var(--on-ac)}
+.stp.flip{font-size:19px}
+.stp.flip.on{background:var(--rest);color:#051720}
+.setrow{display:flex;gap:6px;overflow-x:auto;scrollbar-width:none;cursor:pointer}
+.setrow::-webkit-scrollbar{display:none}
+.sc{flex:1 0 56px;background:var(--s1);border:2px solid transparent;border-radius:12px;padding:4px 4px 5px;text-align:center;line-height:1.15}
+.sc small{display:block;font-size:10px;color:var(--mu);font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+.sc b{display:block;font-size:17px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.sc.done b{color:var(--ac)}
+.sc.now{border-color:var(--ac)}
+.sc.plan b{color:var(--mu);font-weight:600}
+.sc.empty b{color:var(--s3)}
+.hrow{display:flex;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}
+.hrow:last-of-type{border:0}
+.hrow .hd{width:92px;flex:none;color:var(--mu);font-size:14px;padding-top:1px}
+.hrow .hw{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.hrow .hw span{font-size:13px;color:var(--mu)}
 .action{display:flex;flex-direction:column;gap:10px;margin-top:auto}
 .holdnum{font-size:54px;font-weight:800;text-align:center;font-variant-numeric:tabular-nums;letter-spacing:-.02em}
 .resting{display:flex;align-items:center;gap:14px}
@@ -188,11 +221,15 @@ textarea{min-height:120px;resize:vertical}
 .hist .hm{font-size:13px;color:var(--mu)}
 .hist .hx{margin-top:8px;font-size:14px;color:var(--mu);display:flex;flex-direction:column;gap:3px}
 .hist .hx b{color:var(--tx);font-weight:600}
+.hist .hx .alt{display:block;font-size:12px;opacity:.75}
+.switch small{font-size:12px;font-weight:400}
 .empty{text-align:center;color:var(--mu);padding:30px 10px}
 .toast{position:fixed;left:50%;bottom:calc(var(--sab) + 28px);transform:translateX(-50%);background:#fff;color:#111;font-weight:650;padding:12px 18px;border-radius:14px;z-index:99;max-width:86vw;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.4)}
 .toast[hidden]{display:none}
 @media (max-height:700px){
-  .wname{font-size:23px}.btn.huge{min-height:68px;font-size:23px}.wbtn{width:60px;height:60px}.wbox input{font-size:38px}.ring{width:112px;height:112px}.ring .tx b{font-size:32px}
+  .work{gap:7px}.note{display:none}.fig{min-height:70px}
+  .wname{font-size:23px}.btn.huge{min-height:64px;font-size:23px}.wbtn{height:54px}.wu input{font-size:24px}
+  .ring{width:100px;height:100px}.ring .tx b{font-size:28px}.sub .btn{min-height:42px}
 }
 </style>
 </head>

@@ -9,7 +9,6 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const clone = o => JSON.parse(JSON.stringify(o));
-const round2 = n => Math.round(n * 100) / 100;
 const uid = () => 'x' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
 const LIB = Object.fromEntries(LIBRARY.map(e => [e.id, e]));
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -41,16 +40,56 @@ const IC = {
 const ic = n => `<svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${IC[n]}</svg>`;
 
 /* ---------- saved state ---------- */
+const LB = 0.45359237; // kilograms in one pound
+
+/* Version 1 saved each weight as a plain number in one unit, with 2.5 / 5 steps.
+   Version 2 keeps every weight in kilograms (shown as kg and lb together), lets an
+   exercise remember which unit its machine uses, and steps by 0.5 by default. */
+function convertLegacy(d) {
+  const lb = !!(d.settings && d.settings.unit === 'lb');
+  const f = lb ? LB : 1, u = lb ? 'lb' : 'kg';
+  const r4 = n => Math.round(n * 1e4) / 1e4;
+  const fixEx = ex => {
+    if (!ex) return;
+    ex.weight = r4((Number(ex.weight) || 0) * f);
+    ex.unit = u;
+    const old = Number(ex.step);
+    if (lb) { ex.stepLb = old > 0 ? old : 5; ex.step = 0.5; }
+    else { if (!(old > 0) || old === 2 || old === 2.5 || old === 5) ex.step = 0.5; ex.stepLb = 5; }
+  };
+  const fixSets = arr => (arr || []).forEach(s => { s.w = r4((Number(s.w) || 0) * f); });
+  if (d.plan && Array.isArray(d.plan.days)) d.plan.days.forEach(day => (day.exercises || []).forEach(fixEx));
+  if (d.weights) Object.keys(d.weights).forEach(k => { d.weights[k] = r4((Number(d.weights[k]) || 0) * f); });
+  if (Array.isArray(d.history)) d.history.forEach(h => (h.exercises || []).forEach(x => { x.weights = (x.weights || []).map(w => r4((Number(w) || 0) * f)); x.unit = u; }));
+  if (d.session && Array.isArray(d.session.queue)) d.session.queue.forEach(q => {
+    fixEx(q.ex); fixSets(q.setsDone);
+    if (q.orig) { fixEx(q.orig.ex); fixSets(q.orig.setsDone); }
+  });
+  return d;
+}
+if (store.get('gym.schema', null) === null) {
+  if (store.get('gym.plan', null)) {
+    const old = { plan: store.get('gym.plan', null), settings: store.get('gym.settings', {}), weights: store.get('gym.weights', {}), history: store.get('gym.history', []), session: store.get('gym.session', null) };
+    store.set('gym.v1backup', old); // untouched copy of everything, kept just in case
+    const d = convertLegacy(JSON.parse(JSON.stringify(old)));
+    store.set('gym.plan', d.plan); store.set('gym.weights', d.weights); store.set('gym.history', d.history);
+    if (d.session) store.set('gym.session', d.session);
+  }
+  store.set('gym.schema', 2);
+}
+
 let plan = store.get('gym.plan', null);
 if (!plan || !Array.isArray(plan.days)) plan = clone(DEFAULT_PLAN);
-let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true }, store.get('gym.settings', {}));
+let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true, prefill: true }, store.get('gym.settings', {}));
 let session = store.get('gym.session', null);
 let history = store.get('gym.history', []);
-let lastW = store.get('gym.weights', {});
+let lastW = store.get('gym.weights', {}); // last weight used per exercise, in kg
+let lastU = store.get('gym.units', {});   // which unit each exercise's machine uses
 const savePlan = () => store.set('gym.plan', plan);
 const saveSettings = () => store.set('gym.settings', settings);
 const saveHistory = () => store.set('gym.history', history);
 const saveW = () => store.set('gym.weights', lastW);
+const saveU = () => store.set('gym.units', lastU);
 function saveSession() {
   if (session) session.updated = Date.now();
   store.set('gym.session', session);
@@ -61,6 +100,7 @@ if (session && Date.now() - (session.updated || 0) < 6 * 3600e3) view = 'workout
 let edDay = plan.days[0] && plan.days[0].id;
 let histOpen = {};
 let busyAll = false;
+let selDayId = null; // the day picked on the home screen (null = the suggested one)
 
 /* ---------- display helpers ---------- */
 function repsLabel(ex) {
@@ -70,13 +110,28 @@ function repsLabel(ex) {
   if (/[a-z]/i.test(r)) return r;
   return r + ' reps';
 }
-const fmtW = n => String(round2(n));
-// "3 × 40 kg", "40 · 42.5 · 45 kg", or just "3 sets" when no weight was used
-function fmtWeights(ws) {
-  if (ws.every(w => !w)) return ws.length + (ws.length === 1 ? ' set' : ' sets');
-  const u = ' ' + settings.unit;
-  return (ws.every(w => w === ws[0]) ? ws.length + ' × ' + fmtW(ws[0]) : ws.map(fmtW).join(' · ')) + u;
+/* Weights are stored in kilograms (negative = assisted). The unit only decides how
+   a weight is shown and how far the − / + buttons move it. */
+const toUnit = (kg, u) => (u === 'lb' ? kg / LB : kg);
+const fromUnit = (v, u) => (u === 'lb' ? v * LB : v);
+const otherUnit = u => (u === 'lb' ? 'kg' : 'lb');
+function fmtNum(v, dec) {
+  const p = Math.pow(10, dec), r = Math.round(v * p) / p;
+  return String(r === 0 ? 0 : r);
 }
+const fmtIn = (kg, u) => fmtNum(toUnit(kg, u), u === 'lb' ? 1 : 2);   // plain text, for input boxes
+const disp = (kg, u) => fmtIn(kg, u).replace('-', '−');               // for reading, with a real minus
+// "3 × 40 kg", "40 · 42.5 · 45 kg", or just "3 sets" when no weight was used
+function fmtWeights(ws, u) {
+  u = u || 'kg';
+  if (ws.every(w => !w)) return ws.length + (ws.length === 1 ? ' set' : ' sets');
+  const body = ws.every(w => w === ws[0]) ? ws.length + ' × ' + disp(ws[0], u) : ws.map(w => disp(w, u)).join(' · ');
+  return body + ' ' + u;
+}
+const KG_STEPS = [0.5, 1, 2.5, 5, 10];
+const LB_STEPS = [1, 2.5, 5, 10, 25];
+const unitOf = ex => (ex && ex.unit === 'lb' ? 'lb' : 'kg');
+const stepOf = ex => (unitOf(ex) === 'lb' ? (Number(ex.stepLb) || 5) : (Number(ex.step) || 0.5));
 function fmtTime(sec) {
   sec = Math.max(0, Math.round(sec));
   return Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
@@ -87,9 +142,7 @@ function fmtDur(sec) {
 }
 const libOf = ex => (ex && ex.lib && LIB[ex.lib]) || null;
 const groupOf = ex => (libOf(ex) && libOf(ex).group) || (ex && ex.group) || '';
-const isBW = ex => !!(libOf(ex) && libOf(ex).equip === 'bodyweight');
 const keyOf = ex => ex.lib || ('n:' + String(ex.name).toLowerCase());
-const defaultStep = equip => (equip === 'machine' || equip === 'cable' || equip === 'smith') ? 5 : 2.5;
 
 function figure(ex, tag) {
   const L = libOf(ex);
@@ -198,19 +251,105 @@ function startWorkout(dayId) {
   setView('workout');
 }
 
-function setWeight(v) {
-  const q = cur(); if (!q) return;
-  v = Math.max(0, round2(Number.isFinite(v) ? v : 0));
-  q.ex.weight = v;
-  lastW[keyOf(q.ex)] = v; saveW();
-  if (!q.ex.swapped) {
+// Remember this exercise's weight and unit (and write them back into the plan).
+function persistEx(q) {
+  const ex = q.ex, k = keyOf(ex);
+  lastW[k] = ex.weight; lastU[k] = unitOf(ex); saveW(); saveU();
+  if (!ex.swapped && session) {
     const day = findDay(session.dayId);
-    const pe = day && day.exercises.find(e => e.id === q.ex.id);
-    if (pe) { pe.weight = v; savePlan(); }
+    const pe = day && day.exercises.find(e => e.id === ex.id);
+    if (pe) { pe.weight = ex.weight; pe.unit = unitOf(ex); pe.step = ex.step; pe.stepLb = ex.stepLb; savePlan(); }
   }
-  saveSession();
-  const inp = $('#w');
-  if (inp) inp.value = fmtW(v);
+}
+
+function setWeightKg(kg) {
+  const q = cur(); if (!q) return;
+  q.ex.weight = Number.isFinite(kg) ? kg : 0;
+  q.pf = q.setsDone.length; // this set's weight is now decided by hand
+  persistEx(q); saveSession(); refreshWeightUI();
+}
+
+function setActiveUnit(u) {
+  const q = session && cur();
+  if (!q || unitOf(q.ex) === u) return;
+  q.ex.unit = u;
+  persistEx(q); saveSession(); refreshWeightUI();
+}
+
+/* What the same exercise looked like the last time it was saved to History. */
+const histKey = x => x.lib || ('n:' + String(x.name).toLowerCase());
+function lastTimeSets(ex) {
+  const k = keyOf(ex);
+  for (const h of history) {
+    for (const x of h.exercises || []) {
+      if (histKey(x) === k && x.weights && x.weights.length) return { date: h.date, weights: x.weights };
+    }
+  }
+  return null;
+}
+
+/* Start each set at the weight you used for that set last time. After the first set
+   it never goes below the weight you just lifted. Returns true when it ran for a new set. */
+function prefill(q) {
+  const n = q.setsDone.length;
+  if (q.pf === n) return false;
+  q.pf = n;
+  if (!settings.prefill || q.ex.timed) return true;
+  const lt = lastTimeSets(q.ex);
+  if (!lt) return true;
+  const target = lt.weights[n];
+  if (target == null) return true;
+  if (n === 0) {
+    // only when the plan weight wasn't changed by hand since the last workout
+    if (Math.abs(q.ex.weight - lt.weights[lt.weights.length - 1]) < 1e-6) q.ex.weight = target;
+  } else {
+    q.ex.weight = Math.max(target, q.setsDone[n - 1].w);
+  }
+  return true;
+}
+
+/* The weight boxes, step buttons and set-by-set row, refreshed without redrawing the screen. */
+function wtoolsHtml(ex) {
+  const u = unitOf(ex), step = stepOf(ex), neg = ex.weight < 0;
+  const list = (u === 'lb' ? LB_STEPS : KG_STEPS).slice();
+  if (!list.includes(step)) { list.push(step); list.sort((a, b) => a - b); }
+  return `<span class="wlab ${neg ? 'neg' : ''}">${neg ? 'assisted' : 'step ' + u}</span>` +
+    list.map(s => `<button class="stp ${s === step ? 'on' : ''}" data-act="wstepset" data-s="${s}">${s}</button>`).join('') +
+    `<button class="stp flip ${neg ? 'on' : ''}" data-act="wflip" aria-label="Switch between added weight and assisted">±</button>`;
+}
+function setRowHtml(q) {
+  const ex = q.ex, u = unitOf(ex), n = q.setsDone.length;
+  const lt = ex.timed ? null : lastTimeSets(ex);
+  let h = '';
+  for (let i = 0; i < ex.sets; i++) {
+    let cls = 'empty', val = '–';
+    if (i < n) {
+      cls = 'done';
+      val = ex.timed ? (q.setsDone[i].h != null ? q.setsDone[i].h + 's' : '✓') : disp(q.setsDone[i].w, u);
+    } else if (i === n) {
+      cls = 'now';
+      val = ex.timed ? ex.reps + 's' : disp(ex.weight, u);
+    } else if (lt && lt.weights[i] != null) {
+      cls = 'plan';
+      val = disp(lt.weights[i], u);
+    }
+    h += `<div class="sc ${cls}"><small>Set ${i + 1}</small><b>${esc(val)}</b></div>`;
+  }
+  return h;
+}
+function refreshWeightUI() {
+  const q = session && session.queue && cur();
+  if (!q || view !== 'workout') return;
+  const ex = q.ex, u = unitOf(ex);
+  const k = $('#wk'), l = $('#wl');
+  const kv = fmtIn(ex.weight, 'kg'), lv = fmtIn(ex.weight, 'lb');
+  if (k && k.value !== kv) k.value = kv;
+  if (l && l.value !== lv) l.value = lv;
+  const wk = $('#wuk'), wl = $('#wul');
+  if (wk) wk.classList.toggle('act', u === 'kg');
+  if (wl) wl.classList.toggle('act', u === 'lb');
+  const wt = $('#wtools'); if (wt) wt.innerHTML = wtoolsHtml(ex);
+  const sr = $('#setrow'); if (sr) sr.innerHTML = setRowHtml(q);
 }
 
 function setDone() {
@@ -218,6 +357,7 @@ function setDone() {
   const entry = { w: q.ex.weight, t: Date.now() };
   if (q.ex.timed && s.holdStart) entry.h = Math.round((Date.now() - s.holdStart) / 1000);
   q.setsDone.push(entry);
+  persistEx(q);
   s.lastQid = q.qid;
   s.holdStart = 0; s.holdBeeped = false;
   const restSec = q.ex.rest || 0;
@@ -254,6 +394,7 @@ function undoLast() {
   const q = s.queue[i];
   if (!q.setsDone.length) return;
   q.setsDone.pop();
+  q.pf = q.setsDone.length; // keep the weight as it is
   s.idx = i; s.phase = 'work'; s.lastQid = null; s.restEnd = 0; s.holdStart = 0;
   saveSession(); render(); toast('Last set undone');
 }
@@ -281,7 +422,7 @@ function swapTo(libId) {
   const ex = {
     id: uid(), lib: libId, name: L.name, sets: remaining,
     reps: (timed === !!q.ex.timed) ? q.ex.reps : (timed ? '30-45' : '12-15'),
-    rest: q.ex.rest, weight: lastW[libId] || 0, step: defaultStep(L.equip),
+    rest: q.ex.rest, weight: lastW[libId] || 0, unit: lastU[libId] || settings.unit, step: 0.5, stepLb: 5,
     notes: '', timed, swapped: true
   };
   s.queue[s.idx] = { qid: uid(), ex, setsDone: [], orig: q.orig || { ex: q.ex, setsDone: q.setsDone } };
@@ -315,16 +456,17 @@ function buildEntry() {
   const s = session, exs = [];
   s.queue.forEach(q => {
     [q.orig, q].filter(Boolean).forEach(z => {
-      if (z.setsDone.length) exs.push({ name: z.ex.name, lib: z.ex.lib || null, weights: z.setsDone.map(x => x.w), swapped: !!z.ex.swapped });
+      if (z.setsDone.length) exs.push({ name: z.ex.name, lib: z.ex.lib || null, weights: z.setsDone.map(x => x.w), unit: unitOf(z.ex), swapped: !!z.ex.swapped });
     });
   });
-  return { id: uid(), date: s.startedAt, dur: Math.round(((s.finishedAt || Date.now()) - s.startedAt) / 1000), dayName: s.dayName, exercises: exs };
+  return { id: uid(), date: s.startedAt, dur: Math.round(((s.finishedAt || Date.now()) - s.startedAt) / 1000), dayId: s.dayId, dayName: s.dayName, exercises: exs };
 }
 
 function finishSave() {
   const entry = buildEntry();
   if (entry.exercises.length) { history.unshift(entry); history = history.slice(0, 200); saveHistory(); }
   session = null; store.set('gym.session', null);
+  selDayId = null;
   releaseWake(); closeSheet();
   setView('home');
   toast('Workout saved');
@@ -368,6 +510,7 @@ function setView(v) { view = v; render(); window.scrollTo(0, 0); }
 
 function render() {
   if (view === 'workout' && !session) view = 'home';
+  if (view === 'workout' && session.phase !== 'done' && prefill(cur())) saveSession();
   $('#app').innerHTML = view === 'workout' ? viewWorkout()
     : view === 'editor' ? viewEditor()
     : view === 'history' ? viewHistory()
@@ -379,57 +522,60 @@ function dayMinutes(day) {
   const sec = day.exercises.reduce((a, e) => a + e.sets * ((e.timed ? (parseInt(e.reps, 10) || 45) : 40) + (e.rest || 0)), 0);
   return Math.max(5, Math.round(sec / 60 / 5) * 5);
 }
-function nextDay() {
-  const dow = new Date().getDay();
-  let best = null, bestDiff = 99;
-  plan.days.forEach(d => {
-    if (d.weekday === null || d.weekday === undefined || d.weekday === '') return;
-    const diff = (Number(d.weekday) - dow + 7) % 7;
-    if (diff < bestDiff) { best = d; bestDiff = diff; }
-  });
-  if (!best) return { day: plan.days[0] || null, label: '' };
-  const label = bestDiff === 0 ? 'Today' : bestDiff === 1 ? 'Tomorrow' : WEEKDAYS[best.weekday];
-  return { day: best, label };
+/* The week runs Monday to Sunday. "Up next" is the first day of the plan not yet done this week,
+   so skipping a day just moves the order along (and any day can be picked by hand). */
+const weekStart = () => {
+  const x = new Date(); x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  return x.getTime();
+};
+const dayIdOf = h => h.dayId || (plan.days.find(d => d.name === h.dayName) || {}).id;
+function doneThisWeek() { // dayId -> when it was last finished this week
+  const ws = weekStart(), m = new Map();
+  history.forEach(h => { if (h.date >= ws) { const id = dayIdOf(h); if (id && !m.has(id)) m.set(id, h.date); } });
+  return m;
 }
 
 function viewHome() {
   const now = new Date();
-  const nd = nextDay();
+  const done = doneThisWeek();
+  const sug = plan.days.find(d => !done.has(d.id)) || plan.days[0] || null;
+  const sel = plan.days.find(d => d.id === selDayId) || sug;
+  const wd3 = ts => WEEKDAYS[new Date(ts).getDay()].slice(0, 3);
   let h = `<div class="screen">
     <div class="head"><div><div class="eyebrow">${WEEKDAYS[now.getDay()]}, ${esc(now.toLocaleDateString(undefined, { day: 'numeric', month: 'short' }))}</div><h1>Workout</h1></div>
     <button class="icon-btn" data-act="goEditor" aria-label="Edit plan">${ic('sliders')}</button></div>`;
 
   if (session) {
-    const done = session.queue.filter(isComplete).length;
+    const n = session.queue.filter(isComplete).length;
     h += `<div class="card resume"><div class="eyebrow">Workout in progress</div>
       <h2 style="font-size:24px;margin:4px 0 2px">${esc(session.dayName)}</h2>
-      <div class="mu" style="margin-bottom:14px">${done} of ${session.queue.length} exercises done</div>
+      <div class="mu" style="margin-bottom:14px">${n} of ${session.queue.length} exercises done</div>
       <div class="row"><button class="btn primary" data-act="resume">Resume</button><button class="btn ghost" data-act="discardAsk">Discard</button></div></div>`;
   }
 
-  if (nd.day) {
-    const d = nd.day, idx = plan.days.indexOf(d) + 1;
-    h += `<div class="card hero">
-      <div class="eyebrow">${nd.label ? esc(nd.label) + ' · ' : ''}Day ${idx}</div>
-      <h2>${esc(d.name)}</h2>
-      <div class="meta">${d.exercises.length} exercises · about ${dayMinutes(d)} min</div>
-      <div class="thumbs">${d.exercises.slice(0, 6).map(e => thumb(e, '')).join('')}</div>
-      <button class="btn primary big" data-act="start" data-day="${d.id}">${session ? 'Start this instead' : 'Start workout'}</button></div>`;
-    const others = plan.days.filter(x => x !== d);
-    if (others.length) {
-      h += `<div class="sect">Other days</div><div class="daylist">` + others.map(x => {
-        const n = plan.days.indexOf(x) + 1;
-        const wd = (x.weekday === null || x.weekday === undefined || x.weekday === '') ? '' : WEEKDAYS[x.weekday].slice(0, 3) + ' · ';
-        return `<button class="dayrow" data-act="start" data-day="${x.id}"><div><div class="dn">${esc(x.name)}</div><div class="dd">${wd}Day ${n} · ${x.exercises.length} exercises</div></div><span class="go">${ic('chev')}</span></button>`;
-      }).join('') + `</div>`;
-    }
+  if (plan.days.length) {
+    h += `<div class="sect">${done.size} of ${plan.days.length} done this week · tap to pick today's workout</div><div class="daylist">`;
+    plan.days.forEach((d, i) => {
+      const on = sel && d.id === sel.id, dd = done.get(d.id);
+      const usual = (d.weekday === null || d.weekday === undefined || d.weekday === '') ? '' : 'Usually ' + WEEKDAYS[d.weekday].slice(0, 3) + ' · ';
+      const sub = dd ? 'Done ' + wd3(dd) : usual + d.exercises.length + ' exercises · ~' + dayMinutes(d) + ' min';
+      h += `<button class="dayrow ${on ? 'on' : ''}" data-act="pickDay" data-day="${d.id}">
+        <span class="dnum ${dd ? 'ok' : ''}">${dd ? ic('check') : i + 1}</span>
+        <span class="dtx"><span class="dn">${esc(d.name)}${sug && d.id === sug.id ? '<span class="badge up">Up next</span>' : ''}</span>
+          <span class="dd">${esc(sub)}</span>
+          ${on ? `<span class="thumbs">${d.exercises.slice(0, 6).map(e => thumb(e, '')).join('')}</span>` : ''}</span></button>`;
+    });
+    h += `</div>`;
   } else {
     h += `<div class="card empty">No workout days yet.<br>Open <b>Edit plan</b> to add one.</div>`;
   }
 
-  h += `<div class="row" style="margin-top:auto;padding-top:6px">
-    <button class="btn ghost" data-act="goHistory">${ic('clock')} History</button>
-    <button class="btn ghost" data-act="goEditor">${ic('sliders')} Edit plan</button></div></div>`;
+  h += `<div class="startbar">
+    ${sel ? `<button class="btn primary big" data-act="start" data-day="${sel.id}">${session ? 'Start this instead' : 'Start ' + esc(sel.name)}</button>` : ''}
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost" data-act="goHistory">${ic('clock')} History</button>
+      <button class="btn ghost" data-act="goEditor">${ic('sliders')} Edit plan</button></div></div></div>`;
   return h;
 }
 
@@ -463,12 +609,17 @@ function viewWorkout() {
     </div>`;
 
   if (!ex.timed) {
-    const hint = (!ex.weight && !isBW(ex)) ? `${settings.unit} · tap number to type` : isBW(ex) ? `${settings.unit} added · 0 = bodyweight` : settings.unit;
+    const u = unitOf(ex);
     h += `<div class="weight">
       <button class="wbtn" data-act="wstep" data-d="-1" aria-label="Lighter">${ic('minus')}</button>
-      <div class="wbox"><input id="w" type="number" inputmode="decimal" step="any" min="0" value="${fmtW(ex.weight)}" aria-label="Weight"><div class="u">${esc(hint)}</div></div>
-      <button class="wbtn" data-act="wstep" data-d="1" aria-label="Heavier">${ic('plus')}</button></div>`;
+      <div class="wpair">
+        <label class="wu ${u === 'kg' ? 'act' : ''}" id="wuk"><input id="wk" type="number" step="any" value="${fmtIn(ex.weight, 'kg')}" aria-label="Weight in kilograms"><span>kg</span></label>
+        <label class="wu ${u === 'lb' ? 'act' : ''}" id="wul"><input id="wl" type="number" step="any" value="${fmtIn(ex.weight, 'lb')}" aria-label="Weight in pounds"><span>lb</span></label>
+      </div>
+      <button class="wbtn" data-act="wstep" data-d="1" aria-label="Heavier">${ic('plus')}</button></div>
+    <div class="wtools" id="wtools">${wtoolsHtml(ex)}</div>`;
   }
+  h += `<div class="setrow" id="setrow" data-act="exHist" role="button" tabindex="0" aria-label="Weight history by set">${setRowHtml(q)}</div>`;
 
   h += `<div class="action">`;
   if (resting) {
@@ -508,7 +659,7 @@ function viewSummary() {
       <div class="stat"><b>${fmtDur(entry.dur)}</b><span>Time</span></div>
       <div class="stat"><b>${entry.exercises.length}</b><span>Exercises</span></div>
       <div class="stat"><b>${totalSets}</b><span>Sets</span></div></div>
-    <div class="card">${entry.exercises.map(e => `<div class="sumrow"><div>${esc(e.name)}${e.swapped ? ' <span class="badge">swapped</span>' : ''}</div><div class="w">${esc(fmtWeights(e.weights))}</div></div>`).join('')}</div>
+    <div class="card">${entry.exercises.map(e => `<div class="sumrow"><div>${esc(e.name)}${e.swapped ? ' <span class="badge">swapped</span>' : ''}</div><div class="w">${esc(fmtWeights(e.weights, e.unit))}</div></div>`).join('')}</div>
     <div style="margin-top:auto;display:flex;flex-direction:column;gap:10px">
       <button class="btn primary big" data-act="finishSave">Save &amp; finish</button>
       <button class="btn ghost" data-act="undo">${ic('undo')} Undo last set</button></div></div>`;
@@ -542,7 +693,7 @@ function listSheet() {
     s.queue.map((q, i) => {
       const done = isComplete(q), part = q.setsDone.length;
       const st = done ? `<span class="st">${ic('check')}</span>` : part ? `<span class="st mu">${part}/${q.ex.sets}</span>` : `<span class="st mu">${q.ex.sets} sets</span>`;
-      return `<button class="opt ${i === s.idx ? 'cur' : ''} ${done ? 'done' : ''}" data-act="jump" data-i="${i}">${thumb(q.ex, '')}<div><div class="n">${esc(q.ex.name)}</div><div class="m">${esc(repsLabel(q.ex))}${q.ex.weight ? ' · ' + fmtW(q.ex.weight) + ' ' + esc(settings.unit) : ''}</div></div>${st}</button>`;
+      return `<button class="opt ${i === s.idx ? 'cur' : ''} ${done ? 'done' : ''}" data-act="jump" data-i="${i}">${thumb(q.ex, '')}<div><div class="n">${esc(q.ex.name)}</div><div class="m">${esc(repsLabel(q.ex))}${q.ex.weight && !q.ex.timed ? ' · ' + disp(q.ex.weight, unitOf(q.ex)) + ' ' + unitOf(q.ex) : ''}</div></div>${st}</button>`;
     }).join('') + `<button class="btn ghost" style="margin-top:6px" data-act="closeSheet">Close</button>`;
 }
 
@@ -553,6 +704,24 @@ function endSheet() {
       ${any ? `<button class="btn primary" data-act="endSave">Finish &amp; save</button>` : ''}
       <button class="btn danger" data-act="discardNow">Discard workout</button>
       <button class="btn ghost" data-act="closeSheet">Keep going</button></div>`;
+}
+
+/* Every saved session of the current exercise, weight by set, in both units. */
+function exHistSheet() {
+  const q = cur(), ex = q.ex, k = keyOf(ex), u = unitOf(ex), o = otherUnit(u);
+  const rows = [];
+  if (!ex.timed && q.setsDone.length) rows.push({ label: 'Today', ws: q.setsDone.map(s => s.w) });
+  history.forEach(h => (h.exercises || []).forEach(x => {
+    if (rows.length < 10 && histKey(x) === k && x.weights && x.weights.length) {
+      rows.push({ label: new Date(h.date).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }), ws: x.weights });
+    }
+  }));
+  const line = (ws, unit) => ws.map(w => disp(w, unit)).join(' · ') + ' ' + unit;
+  return `<div class="grab"></div><h3>${esc(ex.name)}</h3><p class="sub2">Weight by set, newest first.</p>` +
+    (rows.length && !ex.timed
+      ? rows.map(r => `<div class="hrow"><div class="hd">${esc(r.label)}</div><div class="hw"><b>${esc(line(r.ws, u))}</b>${r.ws.every(w => !w) ? '' : `<span>${esc(line(r.ws, o))}</span>`}</div></div>`).join('')
+      : `<p class="sub2">${ex.timed ? 'Holds are timed, so there are no weights to show.' : 'Nothing saved for this exercise yet. It shows up here after you tap Save &amp; finish.'}</p>`) +
+    `<button class="btn ghost" style="margin-top:10px" data-act="closeSheet">Close</button>`;
 }
 
 /* ---------- history ---------- */
@@ -566,7 +735,11 @@ function viewHistory() {
     h += `<button class="hist" style="width:100%;text-align:left" data-act="histToggle" data-id="${e.id}">
       <div class="hh"><div class="hn">${esc(e.dayName)}</div><div class="hm">${esc(d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' }))}</div></div>
       <div class="hm">${fmtDur(e.dur)} · ${e.exercises.length} exercises · ${sets} sets</div>
-      ${open ? `<div class="hx">${e.exercises.map(x => `<div><b>${esc(x.name)}</b> — ${esc(fmtWeights(x.weights))}</div>`).join('')}</div>` : ''}</button>`;
+      ${open ? `<div class="hx">${e.exercises.map(x => {
+        const u = x.unit || 'kg';
+        const alt = x.weights.every(w => !w) ? '' : `<span class="alt">${esc(fmtWeights(x.weights, otherUnit(u)))}</span>`;
+        return `<div><b>${esc(x.name)}</b> — ${esc(fmtWeights(x.weights, u))}${alt}</div>`;
+      }).join('')}</div>` : ''}</button>`;
   });
   return h + `</div>`;
 }
@@ -588,7 +761,7 @@ function viewEditor() {
       h += `<div class="excard">
         <button class="row" style="flex:1;min-width:0;gap:12px;align-items:center;text-align:left" data-act="edEx" data-id="${e.id}">
           ${thumb(e, 'th')}<div class="body"><div class="n">${esc(e.name)}</div>
-          <div class="m">${e.sets} × ${esc(repsLabel(e))} · ${e.rest}s${e.timed ? '' : ' · ' + fmtW(e.weight) + ' ' + esc(settings.unit)}</div></div></button>
+          <div class="m">${e.sets} × ${esc(repsLabel(e))} · ${e.rest}s${e.timed ? '' : ' · ' + disp(e.weight, unitOf(e)) + ' ' + unitOf(e)}</div></div></button>
         <div class="mv"><button data-act="edMove" data-id="${e.id}" data-d="-1" aria-label="Move up" ${i === 0 ? 'disabled style="opacity:.3"' : ''}>${ic('up')}</button>
           <button data-act="edMove" data-id="${e.id}" data-d="1" aria-label="Move down" ${i === day.exercises.length - 1 ? 'disabled style="opacity:.3"' : ''}>${ic('down')}</button></div></div>`;
     });
@@ -599,7 +772,8 @@ function viewEditor() {
   }
 
   h += `<div class="sect">Settings</div><div class="card" style="padding:6px 16px">
-      <div class="switch" style="cursor:default"><span>Weight unit</span><div class="seg" style="width:130px"><button class="${settings.unit === 'kg' ? 'on' : ''}" data-act="unit" data-u="kg">kg</button><button class="${settings.unit === 'lb' ? 'on' : ''}" data-act="unit" data-u="lb">lb</button></div></div>
+      <div class="switch" style="cursor:default"><span>Unit for new exercises<br><small class="mu">Both units always show while training</small></span><div class="seg" style="width:130px"><button class="${settings.unit === 'kg' ? 'on' : ''}" data-act="unit" data-u="kg">kg</button><button class="${settings.unit === 'lb' ? 'on' : ''}" data-act="unit" data-u="lb">lb</button></div></div>
+      <button class="switch ${settings.prefill ? 'on' : ''}" data-act="tog" data-k="prefill"><span>Start each set at last time's weight<br><small class="mu">Follows your increases set by set</small></span><span class="sw"></span></button>
       <button class="switch ${settings.sound ? 'on' : ''}" data-act="tog" data-k="sound"><span>Beep when rest ends</span><span class="sw"></span></button>
       <button class="switch ${settings.vibrate ? 'on' : ''}" data-act="tog" data-k="vibrate"><span>Vibrate (Android only)</span><span class="sw"></span></button>
       <button class="switch ${settings.awake ? 'on' : ''}" data-act="tog" data-k="awake"><span>Keep screen on during workout</span><span class="sw"></span></button></div>
@@ -616,26 +790,27 @@ function openExEditor(dayId, exId) {
     const ex = day.exercises.find(e => e.id === exId);
     exDraft = { dayId, isNew: false, ex: clone(ex) };
   } else {
-    exDraft = { dayId, isNew: true, ex: { id: uid(), lib: null, name: '', sets: 3, reps: '10-12', rest: 60, weight: 0, step: 2.5, notes: '', timed: false, group: '' } };
+    exDraft = { dayId, isNew: true, ex: { id: uid(), lib: null, name: '', sets: 3, reps: '10-12', rest: 60, weight: 0, unit: settings.unit, step: 0.5, stepLb: 5, notes: '', timed: false, group: '' } };
   }
   showSheet(exEditorSheet);
 }
 function stepper(f, val, mode) {
   return `<div class="stepper"><button data-act="fstep" data-f="${f}" data-d="-1" aria-label="Less">${ic('minus')}</button>
-    <input data-f="${f}" type="number" inputmode="${mode || 'numeric'}" step="any" value="${esc(val)}">
+    <input data-f="${f}" type="number" ${mode ? `inputmode="${mode}" ` : ''}step="any" value="${esc(val)}">
     <button data-act="fstep" data-f="${f}" data-d="1" aria-label="More">${ic('plus')}</button></div>`;
 }
 function exEditorSheet() {
-  const e = exDraft.ex, L = libOf(e);
+  const e = exDraft.ex, L = libOf(e), u = unitOf(e);
   return `<div class="grab"></div><h3>${exDraft.isNew ? 'Add exercise' : 'Edit exercise'}</h3>
     <button class="opt" style="margin-top:10px" data-act="pickOpen">${L ? libThumb(L, '') : `<div class="ph">${ic('dumbbell')}</div>`}<div><div class="n">${L ? esc(L.name) : 'Choose exercise &amp; picture'}</div><div class="m">${L ? 'Tap to change the picture' : 'Tap to pick from the list'}</div></div></button>
     <div class="field"><label>Name</label><input data-f="name" value="${esc(e.name)}" placeholder="e.g. Incline Dumbbell Press" autocapitalize="words"></div>
     <div class="f2"><div class="field"><label>Sets</label>${stepper('sets', e.sets)}</div>
       <div class="field"><label>${e.timed ? 'Seconds' : 'Reps'}</label><input data-f="reps" value="${esc(e.reps)}" placeholder="8-10"></div></div>
     <div class="f2"><div class="field"><label>Rest (sec)</label>${stepper('rest', e.rest)}</div>
-      <div class="field"><label>Weight (${esc(settings.unit)})</label>${stepper('weight', fmtW(e.weight), 'decimal')}</div></div>
-    <div class="f2"><div class="field"><label>+/− button step</label><input data-f="step" type="number" inputmode="decimal" step="any" value="${esc(e.step)}"></div>
-      ${L ? '' : `<div class="field"><label>Muscle group</label><select data-f="group"><option value="">— for swap ideas —</option>${Object.entries(GROUPS).map(([k, v]) => `<option value="${k}" ${e.group === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`}</div>
+      <div class="field"><label>Weight (${u})</label>${stepper('weight', fmtIn(e.weight, u), '')}</div></div>
+    <div class="f2"><div class="field"><label>Machine shows</label><div class="seg"><button class="${u === 'kg' ? 'on' : ''}" data-act="exUnit" data-u="kg">kg</button><button class="${u === 'lb' ? 'on' : ''}" data-act="exUnit" data-u="lb">lb</button></div></div>
+      <div class="field"><label>+/− step (${u})</label><input data-f="stepdisp" type="number" step="any" value="${stepOf(e)}"></div></div>
+    ${L ? '' : `<div class="field"><label>Muscle group</label><select data-f="group"><option value="">— for swap ideas —</option>${Object.entries(GROUPS).map(([k, v]) => `<option value="${k}" ${e.group === k ? 'selected' : ''}>${v}</option>`).join('')}</select></div>`}
     <div class="field"><label>Notes</label><input data-f="notes" value="${esc(e.notes)}" placeholder="Form tip (optional)"></div>
     <button class="switch ${e.timed ? 'on' : ''}" data-act="togTimed"><span>Timed hold (like a plank)</span><span class="sw"></span></button>
     <div class="row" style="margin-top:14px"><button class="btn ghost" data-act="closeSheet">Cancel</button><button class="btn primary" data-act="exSave">Save</button></div>
@@ -689,7 +864,21 @@ const A = {
   resume: () => { unlockAudio(); requestWake(); setView('workout'); },
   discardAsk: () => confirmSheet('Discard workout?', 'Nothing from it will be saved to History.', 'Discard', true, discardSession),
 
-  wstep: b => { const q = cur(); setWeight(q.ex.weight + Number(b.dataset.d) * (Number(q.ex.step) || 2.5)); },
+  // Step in the unit the machine uses (so 5 lb really is 5 lb), then store as kg.
+  wstep: b => {
+    const ex = cur().ex, u = unitOf(ex);
+    const next = Math.round((toUnit(ex.weight, u) + Number(b.dataset.d) * stepOf(ex)) * 1000) / 1000;
+    setWeightKg(fromUnit(next, u));
+  },
+  wstepset: b => {
+    const q = cur(), s = Number(b.dataset.s);
+    if (unitOf(q.ex) === 'lb') q.ex.stepLb = s; else q.ex.step = s;
+    persistEx(q); saveSession(); refreshWeightUI();
+  },
+  // ± turns "added weight" into "assisted" and back. From 0 it starts at one step assisted.
+  wflip: () => { const ex = cur().ex; setWeightKg(ex.weight ? -ex.weight : -fromUnit(stepOf(ex), unitOf(ex))); },
+  exHist: () => showSheet(exHistSheet),
+  pickDay: b => { selDayId = b.dataset.day; render(); },
   setDone: () => { unlockAudio(); setDone(); },
   holdStart: () => { unlockAudio(); session.holdStart = Date.now(); session.holdBeeped = false; saveSession(); render(); },
   skipRest: () => endRest(false),
@@ -746,12 +935,19 @@ const A = {
 
   fstep: b => {
     const f = b.dataset.f, d = Number(b.dataset.d), e = exDraft.ex;
-    const step = f === 'rest' ? 15 : f === 'weight' ? (Number(e.step) || 2.5) : 1;
-    let v = (Number(e[f]) || 0) + d * step;
-    v = f === 'sets' ? Math.max(1, Math.round(v)) : Math.max(0, round2(v));
+    const inp = $(`#sheet input[data-f="${f}"]`);
+    if (f === 'weight') {
+      const u = unitOf(e);
+      e.weight = fromUnit(Math.round((toUnit(Number(e.weight) || 0, u) + d * stepOf(e)) * 1000) / 1000, u);
+      if (inp) inp.value = fmtIn(e.weight, u);
+      return;
+    }
+    let v = (Number(e[f]) || 0) + d * (f === 'rest' ? 15 : 1);
+    v = f === 'sets' ? Math.max(1, Math.round(v)) : Math.max(0, v);
     e[f] = v;
-    const inp = $(`#sheet input[data-f="${f}"]`); if (inp) inp.value = fmtW(v);
+    if (inp) inp.value = v;
   },
+  exUnit: b => { exDraft.ex.unit = b.dataset.u; refreshSheet(); },
   togTimed: () => { exDraft.ex.timed = !exDraft.ex.timed; refreshSheet(); },
   pickOpen: () => { pickQ = ''; showSheet(pickerSheet); },
   pickBack: () => showSheet(exEditorSheet),
@@ -759,9 +955,10 @@ const A = {
   pick: b => {
     const L = LIB[b.dataset.lib], e = exDraft.ex, old = libOf(e);
     if (!e.name.trim() || (old && e.name === old.name)) e.name = L.name;
-    if (exDraft.isNew) { e.timed = L.pattern === 'plank'; e.step = defaultStep(L.equip); if (e.timed) e.reps = '45-60'; }
+    if (exDraft.isNew) { e.timed = L.pattern === 'plank'; if (e.timed) e.reps = '45-60'; }
     e.lib = L.id; e.group = '';
     if (exDraft.isNew && lastW[L.id]) e.weight = lastW[L.id];
+    if (exDraft.isNew && lastU[L.id]) e.unit = lastU[L.id];
     showSheet(exEditorSheet);
   },
   exSave: () => {
@@ -769,12 +966,14 @@ const A = {
     e.name = e.name.trim() || (L ? L.name : 'Exercise');
     e.sets = Math.max(1, Math.round(Number(e.sets) || 1));
     e.rest = Math.max(0, Math.round(Number(e.rest) || 0));
-    e.weight = Math.max(0, Number(e.weight) || 0);
-    e.step = Number(e.step) > 0 ? Number(e.step) : 2.5;
+    e.weight = Number(e.weight) || 0;
+    e.unit = unitOf(e);
+    e.step = Number(e.step) > 0 ? Number(e.step) : 0.5;
+    e.stepLb = Number(e.stepLb) > 0 ? Number(e.stepLb) : 5;
     e.reps = String(e.reps || '').trim();
     if (exDraft.isNew) day.exercises.push(e);
     else { const i = day.exercises.findIndex(x => x.id === e.id); if (i >= 0) day.exercises[i] = e; }
-    lastW[keyOf(e)] = e.weight; saveW();
+    lastW[keyOf(e)] = e.weight; lastU[keyOf(e)] = e.unit; saveW(); saveU();
     savePlan(); closeSheet(); render();
   },
   exDelete: () => {
@@ -786,7 +985,7 @@ const A = {
 
   backupOpen: () => showSheet(backupSheet),
   copyBackup: async () => {
-    const txt = JSON.stringify({ app: 'gym-workout', v: 1, plan, settings, weights: lastW, history });
+    const txt = JSON.stringify({ app: 'gym-workout', v: 2, plan, settings, weights: lastW, units: lastU, history });
     try { await navigator.clipboard.writeText(txt); toast('Backup copied'); }
     catch (e) {
       const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select();
@@ -797,11 +996,13 @@ const A = {
   restore: () => {
     const raw = ($('#restoreTxt') || {}).value || '';
     try {
-      const d = JSON.parse(raw);
+      let d = JSON.parse(raw);
       if (d.app !== 'gym-workout' || !d.plan || !Array.isArray(d.plan.days)) throw new Error('bad');
+      if (!(d.v >= 2)) d = convertLegacy(d); // backup from the first version of the app
       plan = d.plan; savePlan();
       if (d.settings) { settings = Object.assign(settings, d.settings); saveSettings(); }
       if (d.weights) { lastW = d.weights; saveW(); }
+      if (d.units) { lastU = d.units; saveU(); }
       if (Array.isArray(d.history)) { history = d.history; saveHistory(); }
       edDay = plan.days[0] && plan.days[0].id;
       closeSheet(); render(); toast('Backup restored');
@@ -822,17 +1023,26 @@ document.addEventListener('input', e => {
   if (t.id === 'pickSearch') { pickQ = t.value; $('#pickList').innerHTML = pickList(); return; }
   if (t.id === 'dayName') { const d = findDay(edDay); if (d) { d.name = t.value; savePlan(); } return; }
   if (t.dataset && t.dataset.f && exDraft) {
-    exDraft.ex[t.dataset.f] = t.value;
+    const f = t.dataset.f, ex = exDraft.ex, num = parseFloat(String(t.value).replace(',', '.'));
+    if (f === 'weight') ex.weight = fromUnit(Number.isFinite(num) ? num : 0, unitOf(ex)); // typed in the exercise's unit
+    else if (f === 'stepdisp') { if (num > 0) { if (unitOf(ex) === 'lb') ex.stepLb = num; else ex.step = num; } }
+    else ex[f] = t.value;
   }
 });
 document.addEventListener('change', e => {
   const t = e.target;
-  if (t.id === 'w') { setWeight(parseFloat(String(t.value).replace(',', '.'))); return; }
+  const typed = parseFloat(String(t.value).replace(',', '.'));
+  if (t.id === 'wk') { setWeightKg(typed); return; }
+  if (t.id === 'wl') { setWeightKg(typed * LB); return; }
   if (t.id === 'dayWd') { const d = findDay(edDay); if (d) { d.weekday = t.value === '' ? null : Number(t.value); savePlan(); } return; }
   if (t.dataset && t.dataset.f === 'group' && exDraft) exDraft.ex.group = t.value;
 });
-document.addEventListener('focusin', e => { if (e.target.id === 'w') setTimeout(() => e.target.select(), 0); });
-document.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.id === 'w') e.target.blur(); });
+// Touching a weight box also chooses which unit the − / + buttons and step chips use.
+document.addEventListener('focusin', e => {
+  const id = e.target.id;
+  if (id === 'wk' || id === 'wl') { setActiveUnit(id === 'wl' ? 'lb' : 'kg'); setTimeout(() => e.target.select(), 0); }
+});
+document.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.target.id === 'wk' || e.target.id === 'wl')) e.target.blur(); });
 
 /* =====================================================================
    Start-up
