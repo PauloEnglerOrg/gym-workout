@@ -86,13 +86,34 @@ h1,h2,h3,p{margin:0}
 .segs i{flex:1;height:5px;border-radius:3px;background:var(--s3)}
 .segs i.done{background:var(--ac)}
 .segs i.cur{background:#fff}
-.fig{position:relative;flex:1 1 210px;min-height:110px;max-height:250px;border-radius:22px;overflow:hidden;background:#fff}
+.exhead{display:flex;gap:12px;align-items:center}
+.figbtn{flex:0 0 37%;max-width:150px;aspect-ratio:3/2;border-radius:16px;overflow:hidden;position:relative;display:block;background:var(--s1)}
+.fig.pic{background:var(--s1)}
+.pg{display:block;width:100%;height:100%}
+.pg .fl{stroke:#2f3541;stroke-width:1.4}
+.pg .b{fill:none;stroke:#f3f5f8;stroke-width:4.6;stroke-linecap:round;stroke-linejoin:round}
+.pg .b2{fill:none;stroke:#6f7889;stroke-width:4;stroke-linecap:round;stroke-linejoin:round}
+.pg .hd{fill:#f3f5f8}
+.pg .p{fill:none;stroke:#7d8798;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
+.pg .p.w3{stroke-width:3}.pg .p.w4{stroke-width:4}.pg .p.w5{stroke-width:5}
+.pg .pf{fill:#7d8798}
+.pg .cb{stroke-width:1.2}
+.pg .pl{fill:#222731;stroke:var(--ac);stroke-width:2.4}
+.pg .pd{fill:var(--ac)}
+.pg .pw{fill:var(--ac)}
+.pg .pa{fill:none;stroke:var(--ac);stroke-width:2;stroke-linecap:round}
+.exinfo{flex:1;min-width:0}
+.exinfo .wname{font-size:21px;line-height:1.12}
+.exinfo .chips{margin-top:7px;gap:6px}
+.exinfo .chip{padding:4px 10px;font-size:13px}
+.eyebrow.up{color:var(--rest);margin-bottom:2px;font-size:11px}
+.fig{position:absolute;inset:0;overflow:hidden;background:#fff}
+.fig.big{position:relative;inset:auto;aspect-ratio:3/2;border-radius:18px}
 .fig img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
 .fig img.b{animation:flip 1.8s infinite steps(1,end)}
 @keyframes flip{0%{opacity:0}50%{opacity:1}100%{opacity:0}}
 .fig.noimg{background:var(--s1);display:grid;place-items:center;color:var(--mu)}
 .fig.noimg .ic{width:64px;height:64px}
-.fig .tag{position:absolute;left:10px;bottom:10px;background:rgba(14,16,19,.78);color:#fff;font-size:12px;font-weight:650;padding:4px 10px;border-radius:999px;letter-spacing:.03em}
 .wname{font-size:27px;line-height:1.1;letter-spacing:-.02em;font-weight:750}
 .chips{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .chip{background:var(--s2);border-radius:999px;padding:6px 12px;font-size:14px;font-weight:600}
@@ -226,8 +247,14 @@ textarea{min-height:120px;resize:vertical}
 .empty{text-align:center;color:var(--mu);padding:30px 10px}
 .toast{position:fixed;left:50%;bottom:calc(var(--sab) + 28px);transform:translateX(-50%);background:#fff;color:#111;font-weight:650;padding:12px 18px;border-radius:14px;z-index:99;max-width:86vw;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.4)}
 .toast[hidden]{display:none}
+@media (min-height:760px){
+  .work{gap:12px}
+  .wbtn{width:62px;height:84px}.wu{padding:12px 4px 10px}.wu input{font-size:34px}.wu span{font-size:12px}
+  .stp{height:40px;font-size:15px}.sc{padding:7px 4px 8px}.sc small{font-size:11px}.sc b{font-size:20px}
+  .btn.huge{min-height:92px}
+}
 @media (max-height:700px){
-  .work{gap:7px}.note{display:none}.fig{min-height:70px}
+  .work{gap:7px}.note{display:none}
   .wname{font-size:23px}.btn.huge{min-height:64px;font-size:23px}.wbtn{height:54px}.wu input{font-size:24px}
   .ring{width:100px;height:100px}.ring .tx b{font-size:28px}.sub .btn{min-height:42px}
 }
@@ -241,6 +268,8 @@ textarea{min-height:120px;resize:vertical}
 </div>
 <div id="toast" class="toast" hidden></div>
 <script src="library.js"></script>
+<script src="picto.js"></script>
+<script src="picto-data.js"></script>
 <script src="plan.js"></script>
 <script src="app.js"></script>
 </body>

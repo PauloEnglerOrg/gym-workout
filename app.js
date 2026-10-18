@@ -80,7 +80,7 @@ if (store.get('gym.schema', null) === null) {
 
 let plan = store.get('gym.plan', null);
 if (!plan || !Array.isArray(plan.days)) plan = clone(DEFAULT_PLAN);
-let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true, prefill: true }, store.get('gym.settings', {}));
+let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true, prefill: true, pictures: 'drawing' }, store.get('gym.settings', {}));
 let session = store.get('gym.session', null);
 let history = store.get('gym.history', []);
 let lastW = store.get('gym.weights', {}); // last weight used per exercise, in kg
@@ -144,13 +144,16 @@ const libOf = ex => (ex && ex.lib && LIB[ex.lib]) || null;
 const groupOf = ex => (libOf(ex) && libOf(ex).group) || (ex && ex.group) || '';
 const keyOf = ex => ex.lib || ('n:' + String(ex.name).toLowerCase());
 
-function figure(ex, tag) {
-  const L = libOf(ex);
-  if (!L) return `<div class="fig noimg">${ic('dumbbell')}</div>`;
-  const tagHtml = tag ? `<span class="tag">${esc(tag)}</span>` : '';
+// The exercise picture: two photos that flip between start and end pose. `cls` = 'big' for the enlarged view.
+function figure(ex, cls) {
+  const L = libOf(ex), c = 'fig' + (cls ? ' ' + cls : '');
+  if (!L) return `<div class="${c} noimg">${ic('dumbbell')}</div>`;
+  // Small view: an animated drawing when there is a clear one (settings can switch to photos). The big view is always the photo.
+  const key = settings.pictures !== 'photo' && cls !== 'big' && PICTO.map[L.id];
+  if (key) return `<div class="${c} pic">${PICTO.svg(PICTO.specs[key], 0, '', key)}</div>`;
   // Holds (plank): the second photo is the held position, so show just that one.
-  if (ex.timed) return `<div class="fig"><img src="img/${L.id}-1.jpg" alt="">${tagHtml}</div>`;
-  return `<div class="fig"><img src="img/${L.id}-0.jpg" alt=""><img class="b" src="img/${L.id}-1.jpg" alt="">${tagHtml}</div>`;
+  if (ex.timed) return `<div class="${c}"><img src="img/${L.id}-1.jpg" alt=""></div>`;
+  return `<div class="${c}"><img src="img/${L.id}-0.jpg" alt=""><img class="b" src="img/${L.id}-1.jpg" alt=""></div>`;
 }
 function thumb(ex, cls) {
   const L = libOf(ex);
@@ -515,6 +518,7 @@ function render() {
     : view === 'editor' ? viewEditor()
     : view === 'history' ? viewHistory()
     : viewHome();
+  PICTO.start(); // keeps any drawing on screen moving
 }
 
 /* ---------- home ---------- */
@@ -597,16 +601,19 @@ function viewWorkout() {
       <button class="icon-btn" data-act="listOpen" aria-label="All exercises">${ic('list')}</button>
     </div>
     <div class="segs">${segs}</div>
-    ${figure(ex, resting ? 'UP NEXT' : '')}
-    <div>
-      <div class="wname">${esc(ex.name)}</div>
-      <div class="chips" style="margin-top:8px">
-        <span class="chip ac">Set ${setNo} of ${ex.sets}</span>
-        <span class="chip">${esc(repsLabel(ex))}</span>
-        <span class="chip rest">${ex.rest}s rest</span>
+    <div class="exhead">
+      <button class="figbtn" data-act="figOpen" aria-label="Show a bigger picture">${figure(ex)}</button>
+      <div class="exinfo">
+        ${resting ? '<div class="eyebrow up">Up next</div>' : ''}
+        <div class="wname">${esc(ex.name)}</div>
+        <div class="chips">
+          <span class="chip ac">Set ${setNo} of ${ex.sets}</span>
+          <span class="chip">${esc(repsLabel(ex))}</span>
+          <span class="chip rest">${ex.rest}s rest</span>
+        </div>
       </div>
-      ${note ? `<div class="note" style="margin-top:8px">${esc(note)}</div>` : ''}
-    </div>`;
+    </div>
+    ${note ? `<div class="note">${esc(note)}</div>` : ''}`;
 
   if (!ex.timed) {
     const u = unitOf(ex);
@@ -706,6 +713,16 @@ function endSheet() {
       <button class="btn ghost" data-act="closeSheet">Keep going</button></div>`;
 }
 
+/* The picture, big, with the form tip. */
+function figSheet() {
+  const q = cur(), ex = q.ex;
+  const note = (ex.swapped && q.orig ? `Swapped in for ${q.orig.ex.name}. ` : '') + (ex.notes || '');
+  return `<div class="grab"></div>${figure(ex, 'big')}
+    <h3 style="margin-top:14px">${esc(ex.name)}</h3>
+    <p class="sub2">${esc(repsLabel(ex))} · ${ex.sets} sets${note ? ' · ' + esc(note) : ''}</p>
+    <button class="btn ghost" data-act="closeSheet">Close</button>`;
+}
+
 /* Every saved session of the current exercise, weight by set, in both units. */
 function exHistSheet() {
   const q = cur(), ex = q.ex, k = keyOf(ex), u = unitOf(ex), o = otherUnit(u);
@@ -773,6 +790,7 @@ function viewEditor() {
 
   h += `<div class="sect">Settings</div><div class="card" style="padding:6px 16px">
       <div class="switch" style="cursor:default"><span>Unit for new exercises<br><small class="mu">Both units always show while training</small></span><div class="seg" style="width:130px"><button class="${settings.unit === 'kg' ? 'on' : ''}" data-act="unit" data-u="kg">kg</button><button class="${settings.unit === 'lb' ? 'on' : ''}" data-act="unit" data-u="lb">lb</button></div></div>
+      <div class="switch" style="cursor:default"><span>Exercise pictures<br><small class="mu">Tap the picture while training for a big photo</small></span><div class="seg" style="width:150px"><button class="${settings.pictures !== 'photo' ? 'on' : ''}" data-act="pics" data-v="drawing">Drawing</button><button class="${settings.pictures === 'photo' ? 'on' : ''}" data-act="pics" data-v="photo">Photo</button></div></div>
       <button class="switch ${settings.prefill ? 'on' : ''}" data-act="tog" data-k="prefill"><span>Start each set at last time's weight<br><small class="mu">Follows your increases set by set</small></span><span class="sw"></span></button>
       <button class="switch ${settings.sound ? 'on' : ''}" data-act="tog" data-k="sound"><span>Beep when rest ends</span><span class="sw"></span></button>
       <button class="switch ${settings.vibrate ? 'on' : ''}" data-act="tog" data-k="vibrate"><span>Vibrate (Android only)</span><span class="sw"></span></button>
@@ -878,6 +896,7 @@ const A = {
   // ± turns "added weight" into "assisted" and back. From 0 it starts at one step assisted.
   wflip: () => { const ex = cur().ex; setWeightKg(ex.weight ? -ex.weight : -fromUnit(stepOf(ex), unitOf(ex))); },
   exHist: () => showSheet(exHistSheet),
+  figOpen: () => showSheet(figSheet),
   pickDay: b => { selDayId = b.dataset.day; render(); },
   setDone: () => { unlockAudio(); setDone(); },
   holdStart: () => { unlockAudio(); session.holdStart = Date.now(); session.holdBeeped = false; saveSession(); render(); },
@@ -928,6 +947,7 @@ const A = {
     savePlan(); render();
   },
   unit: b => { settings.unit = b.dataset.u; saveSettings(); render(); },
+  pics: b => { settings.pictures = b.dataset.v; saveSettings(); render(); },
   tog: b => { const k = b.dataset.k; settings[k] = !settings[k]; saveSettings(); render(); },
   resetAsk: () => confirmSheet('Reset the plan?', 'This puts back the 5 days from your spreadsheet. Your weights for each exercise will be cleared. History is kept.', 'Reset plan', true, () => {
     plan = clone(DEFAULT_PLAN); savePlan(); edDay = plan.days[0].id; render(); toast('Plan reset');

@@ -7,6 +7,7 @@ A phone-first workout companion: start a day, follow each exercise with a pictur
 - `app.js` – all the behaviour
 - `plan.js` – the starting plan (from the "Workout Plan Tracker" spreadsheet)
 - `library.js` – the exercise list used for pictures and "machine busy" swap suggestions
+- `picto.js`, `picto-data.js` – the animated stick-figure drawings (drawn from joint angles, no image files)
 - `sw.js` – offline helper (keeps a copy of the app and pictures on the phone)
 - `img/` – exercise pictures (two poses each)
 
