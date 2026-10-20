@@ -80,7 +80,7 @@ if (store.get('gym.schema', null) === null) {
 
 let plan = store.get('gym.plan', null);
 if (!plan || !Array.isArray(plan.days)) plan = clone(DEFAULT_PLAN);
-let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true, prefill: true, pictures: 'drawing' }, store.get('gym.settings', {}));
+let settings = Object.assign({ unit: 'kg', sound: true, vibrate: true, awake: true, prefill: true, pictures: 'drawing', alarmVol: 'loud' }, store.get('gym.settings', {}));
 let session = store.get('gym.session', null);
 let history = store.get('gym.history', []);
 let lastW = store.get('gym.weights', {}); // last weight used per exercise, in kg
@@ -191,31 +191,53 @@ function confirmSheet(title, text, okLabel, danger, cb) {
 /* =====================================================================
    Sound, vibration, screen-awake
    ===================================================================== */
-let actx = null;
-function unlockAudio() {
+let actx = null, master = null;
+function unlockAudio() { // must run from a tap, otherwise the phone keeps the sound switched off
   try {
     actx = actx || new (window.AudioContext || window.webkitAudioContext)();
-    if (actx.state === 'suspended') actx.resume();
+    if (actx.state !== 'running') actx.resume();
   } catch (e) { /* no sound available */ }
 }
-function beep(freq = 880, dur = 0.16, vol = 0.35) {
+const ALARM_VOL = { normal: 0.35, loud: 0.6, max: 0.9 };
+const BEEP = 1175, LONG = 1568; // pitch in Hz: a high, sharp tone cuts through music
+// One clear beep: a square wave (much more present than a soft sine) with a quick fade so it never clicks.
+function tone(freq, at, dur) {
   if (!settings.sound || !actx) return;
   try {
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = 'sine'; o.frequency.value = freq; g.gain.value = vol;
-    o.connect(g); g.connect(actx.destination);
-    o.start();
-    g.gain.exponentialRampToValueAtTime(0.001, actx.currentTime + dur);
-    o.stop(actx.currentTime + dur + 0.03);
+    if (actx.state !== 'running') actx.resume();
+    if (!master) {
+      const comp = actx.createDynamicsCompressor(); // stops the loudest setting from distorting
+      comp.threshold.value = -14; comp.ratio.value = 8; comp.attack.value = 0.002; comp.release.value = 0.12;
+      master = actx.createGain(); master.connect(comp); comp.connect(actx.destination);
+    }
+    master.gain.value = ALARM_VOL[settings.alarmVol] || ALARM_VOL.loud;
+    const t0 = actx.currentTime + at;
+    const o = actx.createOscillator(), lp = actx.createBiquadFilter(), g = actx.createGain();
+    o.type = 'square'; o.frequency.value = freq;
+    lp.type = 'lowpass'; lp.frequency.value = 5200;
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(1, t0 + 0.012);
+    g.gain.setValueAtTime(1, t0 + dur - 0.04);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    o.connect(lp); lp.connect(g); g.connect(master);
+    o.start(t0); o.stop(t0 + dur + 0.02);
   } catch (e) { /* ignore */ }
 }
+function beeps(n, freq, at) { for (let i = 0; i < n; i++) tone(freq || BEEP, (at || 0) + i * 0.27, 0.15); }
 function buzz(pattern) {
   if (settings.vibrate && navigator.vibrate) { try { navigator.vibrate(pattern); } catch (e) { /* ignore */ } }
 }
-function alertNow() {
-  beep(880, 0.16); setTimeout(() => beep(880, 0.16), 220); setTimeout(() => beep(1175, 0.3), 440);
-  buzz([200, 100, 200, 100, 400]);
+// 15 s left: three beeps, 10 s: two, 5 s: one. Then one long beep at zero.
+function warn(secLeft) {
+  const n = secLeft === 15 ? 3 : secLeft === 10 ? 2 : 1;
+  beeps(n);
+  buzz(Array.from({ length: n * 2 - 1 }, (_, i) => (i % 2 ? 90 : 130)));
+  const ring = $('.ring');
+  if (ring) { ring.classList.remove('pulse'); void ring.offsetWidth; ring.classList.add('pulse'); }
 }
+function alarmEnd() { tone(LONG, 0, 1.5); buzz([900]); }
+function holdAlert() { beeps(3, LONG); buzz([150, 90, 150, 90, 150]); }
+function testBeeps() { unlockAudio(); beeps(3); beeps(2, BEEP, 1.3); beeps(1, BEEP, 2.4); tone(LONG, 3.3, 1.5); }
 let wake = null;
 async function requestWake() {
   if (!settings.awake || !('wakeLock' in navigator) || wake) return;
@@ -370,7 +392,8 @@ function setDone() {
     s.idx = nxt;
   }
   if (restSec > 0) {
-    s.phase = 'rest'; s.restTotal = restSec; s.restEnd = Date.now() + restSec * 1000; s.lastBeepSec = null;
+    s.phase = 'rest'; s.restTotal = restSec; s.restEnd = Date.now() + restSec * 1000;
+    s.fired = { 5: restSec <= 5, 10: restSec <= 10, 15: restSec <= 15 }; // a warning already "behind us" never sounds
   } else {
     s.phase = 'work';
   }
@@ -385,7 +408,7 @@ function finishLine() {
 function endRest(auto) {
   session.phase = 'work'; session.restEnd = 0;
   saveSession();
-  if (auto) alertNow();
+  if (auto) alarmEnd();
   render();
   if (auto) { const sc = $('.screen'); if (sc) sc.classList.add('flash'); }
 }
@@ -489,21 +512,34 @@ function onTick() {
   if (s.phase === 'rest') {
     const leftMs = s.restEnd - Date.now();
     const left = Math.ceil(leftMs / 1000);
-    if (left <= 0) { endRest(true); return; }
+    if (left <= 0) {
+      // Coming back to the app long after the rest ended: don't sound a stale alarm, just say so.
+      if (-leftMs > 4000) { endRest(false); toast('Rest ended ' + fmtTime(-leftMs / 1000) + ' ago. Beeps only sound while the app is open on screen.'); }
+      else endRest(true);
+      return;
+    }
     const rt = $('#rt'); if (rt) rt.textContent = fmtTime(left);
     const fg = $('#ringfg');
     if (fg) fg.style.strokeDashoffset = String(RING_C * (1 - Math.max(0, leftMs) / (s.restTotal * 1000)));
-    if (left <= 3 && s.lastBeepSec !== left) { s.lastBeepSec = left; beep(660, 0.08, 0.25); }
+    if (!s.fired) s.fired = { 5: false, 10: false, 15: false };
+    for (const t of [5, 10, 15]) {
+      if (left <= t && !s.fired[t]) {
+        s.fired[t] = true;
+        if (left > t - 2) warn(t); // only on time, not as a late catch-up
+      }
+    }
   } else if (s.phase === 'work' && s.holdStart) {
     const sec = Math.floor((Date.now() - s.holdStart) / 1000);
     const h = $('#hold'); if (h) h.textContent = fmtTime(sec);
     const target = parseInt(String(cur().ex.reps), 10) || 0;
-    if (target && sec >= target && !s.holdBeeped) { s.holdBeeped = true; alertNow(); }
+    if (target && sec >= target && !s.holdBeeped) { s.holdBeeped = true; holdAlert(); }
   }
 }
 setInterval(onTick, 250);
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && session && view === 'workout') { requestWake(); onTick(); }
+  if (document.visibilityState !== 'visible') return;
+  if (actx && actx.state !== 'running') { try { actx.resume().catch(() => {}); } catch (e) { /* ignore */ } } // phones switch sound off in the background
+  if (session && view === 'workout') { requestWake(); onTick(); }
 });
 
 /* =====================================================================
@@ -792,7 +828,9 @@ function viewEditor() {
       <div class="switch" style="cursor:default"><span>Unit for new exercises<br><small class="mu">Both units always show while training</small></span><div class="seg" style="width:130px"><button class="${settings.unit === 'kg' ? 'on' : ''}" data-act="unit" data-u="kg">kg</button><button class="${settings.unit === 'lb' ? 'on' : ''}" data-act="unit" data-u="lb">lb</button></div></div>
       <div class="switch" style="cursor:default"><span>Exercise pictures<br><small class="mu">Tap the picture while training for a big photo</small></span><div class="seg" style="width:150px"><button class="${settings.pictures !== 'photo' ? 'on' : ''}" data-act="pics" data-v="drawing">Drawing</button><button class="${settings.pictures === 'photo' ? 'on' : ''}" data-act="pics" data-v="photo">Photo</button></div></div>
       <button class="switch ${settings.prefill ? 'on' : ''}" data-act="tog" data-k="prefill"><span>Start each set at last time's weight<br><small class="mu">Follows your increases set by set</small></span><span class="sw"></span></button>
-      <button class="switch ${settings.sound ? 'on' : ''}" data-act="tog" data-k="sound"><span>Beep when rest ends</span><span class="sw"></span></button>
+      <button class="switch ${settings.sound ? 'on' : ''}" data-act="tog" data-k="sound"><span>Warning beeps during rest<br><small class="mu">3 beeps at 15 s, 2 at 10 s, 1 at 5 s, then a long one. Only sounds while the app is open on screen.</small></span><span class="sw"></span></button>
+      <div class="switch" style="cursor:default"><span>Beep volume</span><div class="seg" style="width:200px"><button class="${settings.alarmVol === 'normal' ? 'on' : ''}" data-act="vol" data-v="normal">Normal</button><button class="${(settings.alarmVol || 'loud') === 'loud' ? 'on' : ''}" data-act="vol" data-v="loud">Loud</button><button class="${settings.alarmVol === 'max' ? 'on' : ''}" data-act="vol" data-v="max">Max</button></div></div>
+      <div class="switch" style="cursor:default"><span>Try it with your music on<br><small class="mu">Plays the whole sequence (about 5 s)</small></span><button class="btn sm" data-act="testBeeps">Test beeps</button></div>
       <button class="switch ${settings.vibrate ? 'on' : ''}" data-act="tog" data-k="vibrate"><span>Vibrate (Android only)</span><span class="sw"></span></button>
       <button class="switch ${settings.awake ? 'on' : ''}" data-act="tog" data-k="awake"><span>Keep screen on during workout</span><span class="sw"></span></button></div>
     <button class="btn ghost" data-act="backupOpen">Backup &amp; restore</button>
@@ -904,6 +942,8 @@ const A = {
   restAdj: b => {
     const s = session, d = Number(b.dataset.d);
     s.restEnd += d * 1000; s.restTotal = Math.max(5, s.restTotal + d);
+    const left = Math.ceil((s.restEnd - Date.now()) / 1000);
+    s.fired = { 5: left <= 5, 10: left <= 10, 15: left <= 15 }; // +15 s re-arms the warnings that are ahead again
     saveSession();
     if (s.restEnd - Date.now() <= 0) endRest(false); else onTick();
   },
@@ -948,6 +988,8 @@ const A = {
   },
   unit: b => { settings.unit = b.dataset.u; saveSettings(); render(); },
   pics: b => { settings.pictures = b.dataset.v; saveSettings(); render(); },
+  vol: b => { settings.alarmVol = b.dataset.v; saveSettings(); render(); unlockAudio(); beeps(1); }, // one beep to preview the level
+  testBeeps: () => testBeeps(),
   tog: b => { const k = b.dataset.k; settings[k] = !settings[k]; saveSettings(); render(); },
   resetAsk: () => confirmSheet('Reset the plan?', 'This puts back the 5 days from your spreadsheet. Your weights for each exercise will be cleared. History is kept.', 'Reset plan', true, () => {
     plan = clone(DEFAULT_PLAN); savePlan(); edDay = plan.days[0].id; render(); toast('Plan reset');

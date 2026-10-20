@@ -162,6 +162,9 @@ h1,h2,h3,p{margin:0}
 .ring circle{fill:none;stroke-width:9}
 .ring .bg{stroke:var(--s3)}
 .ring .fg{stroke:var(--rest);stroke-linecap:round;transition:stroke-dashoffset .25s linear}
+.ring.pulse{animation:pulse .55s ease-out}
+.ring.pulse .tx b{color:var(--ac)}
+@keyframes pulse{0%{transform:scale(1)}35%{transform:scale(1.09)}100%{transform:scale(1)}}
 .ring .tx{position:absolute;inset:0;display:grid;place-content:center;text-align:center}
 .ring .tx b{font-size:38px;font-variant-numeric:tabular-nums;letter-spacing:-.03em}
 .ring .tx span{font-size:12px;color:var(--mu);text-transform:uppercase;letter-spacing:.08em;font-weight:600}
@@ -244,6 +247,7 @@ textarea{min-height:120px;resize:vertical}
 .hist .hx b{color:var(--tx);font-weight:600}
 .hist .hx .alt{display:block;font-size:12px;opacity:.75}
 .switch small{font-size:12px;font-weight:400}
+.switch .btn{white-space:nowrap;flex:none}
 .empty{text-align:center;color:var(--mu);padding:30px 10px}
 .toast{position:fixed;left:50%;bottom:calc(var(--sab) + 28px);transform:translateX(-50%);background:#fff;color:#111;font-weight:650;padding:12px 18px;border-radius:14px;z-index:99;max-width:86vw;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.4)}
 .toast[hidden]{display:none}
